@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Pitot-Static Failure Simulator</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+  h1 { margin-bottom: 5px; }
+  .container { display: flex; flex-wrap: wrap; gap: 20px; }
+  .panel { background: #fff; border: 1px solid #ccc; border-radius: 8px; padding: 15px; min-width: 280px; }
+  label { display: block; margin-top: 8px; }
+  input[type="range"] { width: 100%; }
+  .gauges { display: flex; flex-wrap: wrap; gap: 20px; }
+  .gauge-panel { text-align: center; }
+  .gauge-container { width: 220px; height: 220px; position: relative; margin: 0 auto; }
+  .gauge-face {
+    width: 220px; height: 220px; border-radius: 50%;
+    background: #111; border: 6px solid #333; position: relative; color: #fff;
+  }
+  .gauge-label { position: absolute; bottom: 10px; width: 100%; text-align: center; font-size: 0.9em; }
+  .needle {
+    width: 3px; height: 90px; background: red;
+    position: absolute; left: 108px; top: 30px;
+    transform-origin: bottom center; border-radius: 2px;
+  }
+  .center-dot {
+    width: 10px; height: 10px; border-radius: 50%; background: #ccc;
+    position: absolute; left: 105px; top: 105px;
+  }
+  .tick {
+    position: absolute; width: 3px; height: 12px; background: #fff;
+    left: 108px; top: 10px; transform-origin: bottom center; opacity: 0.7;
+  }
+  .readout { margin-top: 6px; font-weight: bold; }
+  .explanation { font-size: 0.9em; line-height: 1.3; }
+</style>
+</head>
+<body>
+
+<h1>Pitot-Static Failure Simulator</h1>
+<p>Three-instrument cockpit view with pitot and static failures. Adjust airspeed and altitude, then apply failures to see what happens.</p>
+
+<div class="container">
+
+  <!-- Controls -->
+  <div class="panel">
+    <h2>Controls</h2>
+
+    <label>
+      True Airspeed (KTAS): <span id="tasLabel">100</span>
+      <input id="tas" type="range" min="0" max="200" value="100" step="5">
+    </label>
+
+    <label>
+      True Altitude (ft): <span id="altLabel">5000</span>
+      <input id="alt" type="range" min="0" max="20000" value="5000" step="500">
+    </label>
+
+    <label>
+      <input id="autoClimb" type="checkbox">
+      Auto climb/descent (+500 fpm climb / -500 fpm descent toggle)
+    </label>
+
+    <label><input id="pitotRamClogged" type="checkbox"> Pitot ram hole clogged</label>
+    <label><input id="pitotDrainClogged" type="checkbox"> Pitot drain hole clogged</label>
+    <label><input id="staticClogged" type="checkbox"> Static port clogged</label>
+
+    <button id="resetFailures">Reset failures & freeze states</button>
+  </div>
+
+  <!-- Gauges -->
+  <div class="panel" style="flex:1;">
+    <h2>Cockpit Instruments</h2>
+    <div class="gauges">
+      <!-- Airspeed -->
+      <div class="gauge-panel">
+        <div class="gauge-container">
+          <div class="gauge-face" id="asiFace">
+            <div class="gauge-label">AIRSPEED (KT)</div>
+            <div class="center-dot"></div>
+            <div class="needle" id="asiNeedle"></div>
+          </div>
+        </div>
+        <div class="readout" id="asiReadout">IAS: 100 KT</div>
+      </div>
+
+      <!-- Altimeter -->
+      <div class="gauge-panel">
+        <div class="gauge-container">
+          <div class="gauge-face" id="altFace">
+            <div class="gauge-label">ALTIMETER (FT)</div>
+            <div class="center-dot"></div>
+            <div class="needle" id="altNeedle"></div>
+          </div>
+        </div>
+        <div class="readout" id="altReadout">Indicated Alt: 5000 ft</div>
+      </div>
+
+      <!-- VSI -->
+      <div class="gauge-panel">
+        <div class="gauge-container">
+          <div class="gauge-face" id="vsiFace">
+            <div class="gauge-label">VSI (FPM)</div>
+            <div class="center-dot"></div>
+            <div class="needle" id="vsiNeedle"></div>
+          </div>
+        </div>
+        <div class="readout" id="vsiReadout">VSI: 0 fpm</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Explanation -->
+  <div class="panel">
+    <h2>What’s Happening</h2>
+    <div class="explanation" id="explanation"></div>
+  </div>
+
+</div>
+
+<script>
+  // --- DOM elements ---
+  const tasSlider = document.getElementById('tas');
+  const altSlider = document.getElementById('alt');
+  const tasLabel = document.getElementById('tasLabel');
+  const altLabel = document.getElementById('altLabel');
+  const autoClimb = document.getElementById('autoClimb');
+
+  const pitotRamClogged = document.getElementById('pitotRamClogged');
+  const pitotDrainClogged = document.getElementById('pitotDrainClogged');
+  const staticClogged = document.getElementById('staticClogged');
+  const resetFailures = document.getElementById('resetFailures');
+
+  const asiNeedle = document.getElementById('asiNeedle');
+  const altNeedle = document.getElementById('altNeedle');
+  const vsiNeedle = document.getElementById('vsiNeedle');
+
+  const asiReadout = document.getElementById('asiReadout');
+  const altReadout = document.getElementById('altReadout');
+  const vsiReadout = document.getElementById('vsiReadout');
+  const explanation = document.getElementById('explanation');
+
+  const asiFace = document.getElementById('asiFace');
+  const altFace = document.getElementById('altFace');
+  const vsiFace = document.getElementById('vsiFace');
+
+  // --- Constants / simple atmosphere ---
+  const rho0 = 1.225; // kg/m^3
+  const ktsToMs = 0.514444;
+  const p0 = 101325; // Pa
+  const T0 = 288.15; // K
+  const g = 9.80665;
+  const L = 0.0065;
+  const R = 287.05;
+
+  function airDensity(altFt) {
+    const altM = altFt * 0.3048;
+    const T = T0 - L * altM;
+    const p = p0 * Math.pow(1 - (L * altM) / T0, g / (R * L));
+    return p / (R * T);
+  }
+
+  function staticPressure(altFt) {
+    const altM = altFt * 0.3048;
+    return p0 * Math.pow(1 - (L * altM) / T0, g / (R * L));
+  }
+
+  function computeDynamicPressure(tasKt, altFt) {
+    const v = tasKt * ktsToMs;
+    const rho = airDensity(altFt);
+    return 0.5 * rho * v * v;
+  }
+
+  function computeIASFromQ(q, altFt) {
+    const rho = airDensity(altFt);
+    if (rho <= 0 || q <= 0) return 0;
+    const v = Math.sqrt((2 * q) / rho);
+    return v / ktsToMs;
+  }
+
+  function altitudeFromStatic(p) {
+    // Invert barometric formula (approx)
+    const term = Math.pow(p / p0, (R * L) / g);
+    const altM = (T0 / L) * (1 - term);
+    return altM / 0.3048;
+  }
+
+  // --- Instrument internal states ---
+  let trueAltFt = Number(altSlider.value);
+  let trueTasKt = Number(tasSlider.value);
+
+  let instrStaticPressure = staticPressure(trueAltFt); // what the instruments "see"
+  let instrPitotPressure = staticPressure(trueAltFt) + computeDynamicPressure(trueTasKt, trueAltFt);
+
+  let lastAltForVSI = trueAltFt;
+  let lastTime = performance.now();
+
+  // --- Gauge helpers ---
+  function setNeedle(needleEl, value, minVal, maxVal, sweepDeg) {
+    const clamped = Math.max(minVal, Math.min(maxVal, value));
+    const frac = (clamped - minVal) / (maxVal - minVal); // 0..1
+    const angle = (frac * sweepDeg) - sweepDeg / 2;      // center at 0
+    needleEl.style.transition = "transform 0.2s ease-out";
+    needleEl.style.transform = `rotate(${angle}deg)`;
+  }
+
+  function addTicks(faceEl, count, sweepDeg) {
+    for (let i = 0; i < count; i++) {
+      const tick = document.createElement('div');
+      tick.className = 'tick';
+      const frac = i / (count - 1);
+      const angle = (frac * sweepDeg) - sweepDeg / 2;
+      tick.style.transform = `rotate(${angle}deg)`;
+      faceEl.appendChild(tick);
+    }
+  }
+
+  // Create ticks once
+  addTicks(asiFace, 9, 240); // 0–200 kt
+  addTicks(altFace, 9, 240); // 0–20,000 ft
+  addTicks(vsiFace, 9, 240); // -2000–+2000 fpm
+
+  // --- Main update loop ---
+  function update(dtSec) {
+    // Update true controls
+    trueTasKt = Number(tasSlider.value);
+    tasLabel.textContent = trueTasKt;
+
+    if (autoClimb.checked) {
+      // Simple auto climb/descent: alternate climb/descent every few seconds
+      const t = performance.now() / 1000;
+      const rate = Math.sin(t / 5) * 500; // +/- 500 fpm
+      trueAltFt += rate * (dtSec / 60);
+      trueAltFt = Math.max(0, Math.min(20000, trueAltFt));
+      altSlider.value = trueAltFt;
+    } else {
+      trueAltFt = Number(altSlider.value);
+    }
+    altLabel.textContent = Math.round(trueAltFt);
+
+    const trueStatic = staticPressure(trueAltFt);
+    const trueQ = computeDynamicPressure(trueTasKt, trueAltFt);
+    const truePitot = trueStatic + trueQ;
+
+    // Update instrument static pressure
+    if (!staticClogged.checked) {
+      instrStaticPressure = trueStatic;
+    }
+    // Update instrument pitot pressure
+    if (!pitotRamClogged.checked && !pitotDrainClogged.checked) {
+      instrPitotPressure = truePitot;
+    } else if (pitotRamClogged.checked && !pitotDrainClogged.checked) {
+      // Ram clogged, drain open -> pitot bleeds to static
+      instrPitotPressure = instrStaticPressure;
+    } else if (!pitotRamClogged.checked && pitotDrainClogged.checked) {
+      // Drain clogged, ram open -> behaves like normal in this simplified model
+      instrPitotPressure = truePitot;
+    } else if (pitotRamClogged.checked && pitotDrainClogged.checked) {
+      // Both clogged -> pitot pressure frozen (do nothing)
+    }
+
+    // Compute indicated values
+    const qInstr = Math.max(0, instrPitotPressure - instrStaticPressure);
+    const ias = computeIASFromQ(qInstr, trueAltFt);
+
+    const indicatedAlt = altitudeFromStatic(instrStaticPressure);
+
+    // VSI from change in indicated altitude over time
+    const vsiFpm = ((indicatedAlt - lastAltForVSI) / dtSec) * 60;
+    lastAltForVSI = indicatedAlt;
+
+    // --- Set needles ---
+    setNeedle(asiNeedle, ias, 0, 200, 240);
+    setNeedle(altNeedle, indicatedAlt, 0, 20000, 240);
+    setNeedle(vsiNeedle, vsiFpm, -2000, 2000, 240);
+
+    asiReadout.textContent = `IAS: ${ias.toFixed(0)} KT`;
+    altReadout.textContent = `Indicated Alt: ${Math.round(indicatedAlt)} ft`;
+    vsiReadout.textContent = `VSI: ${Math.round(vsiFpm)} fpm`;
+
+    // --- Explanation text ---
+    let lines = [];
+
+    // Base state
+    lines.push(`True TAS: ${trueTasKt.toFixed(0)} KT, True Altitude: ${Math.round(trueAltFt)} ft.`);
+
+    // Pitot failures
+    if (!pitotRamClogged.checked && !pitotDrainClogged.checked) {
+      lines.push('Pitot system: normal.');
+    } else if (pitotRamClogged.checked && !pitotDrainClogged.checked) {
+      lines.push('Pitot ram hole clogged, drain open: pitot pressure bleeds to static, IAS trends toward zero.');
+    } else if (!pitotRamClogged.checked && pitotDrainClogged.checked) {
+      lines.push('Pitot drain clogged, ram open: pitot behaves normally in steady flight (water trapping not modeled).');
+    } else if (pitotRamClogged.checked && pitotDrainClogged.checked) {
+      lines.push('Pitot ram and drain both clogged: pitot pressure is frozen at the value when it clogged.');
+    }
+
+    // Static failures
+    if (!staticClogged.checked) {
+      lines.push('Static system: normal.');
+    } else {
+      lines.push('Static port clogged: static pressure is frozen at the value when it clogged.');
+    }
+
+    // Instrument-specific behavior
+    if (!staticClogged.checked && !pitotRamClogged.checked && !pitotDrainClogged.checked) {
+      lines.push('All three instruments behave normally.');
+    } else {
+      // Airspeed
+      if (staticClogged.checked && !pitotRamClogged.checked && !pitotDrainClogged.checked) {
+        lines.push('Airspeed: static is frozen, so IAS misreads with altitude changes (can overread in climb, underread in descent).');
+      } else if (pitotRamClogged.checked && !pitotDrainClogged.checked) {
+        lines.push('Airspeed: pitot equals static, so IAS goes to zero regardless of true airspeed.');
+      } else if (pitotRamClogged.checked && pitotDrainClogged.checked && !staticClogged.checked) {
+        lines.push('Airspeed: pitot is frozen, static changes with altitude, so IAS behaves like an altimeter.');
+      }
+
+      // Altimeter & VSI
+      if (staticClogged.checked) {
+        lines.push('Altimeter: indicated altitude is frozen at the value when the static port clogged.');
+        lines.push('VSI: shows zero (no sensed change in static pressure), even if the aircraft is climbing or descending.');
+      } else {
+        lines.push('Altimeter: follows true altitude (simplified ISA model).');
+        lines.push('VSI: responds to rate of change of indicated altitude.');
+      }
+    }
+
+    explanation.textContent = lines.join(' ');
+  }
+
+  // --- Event wiring ---
+  tasSlider.addEventListener('input', () => {});
+  altSlider.addEventListener('input', () => {});
+  autoClimb.addEventListener('change', () => {});
+
+  resetFailures.addEventListener('click', () => {
+    pitotRamClogged.checked = false;
+    pitotDrainClogged.checked = false;
+    staticClogged.checked = false;
+    instrStaticPressure = staticPressure(trueAltFt);
+    instrPitotPressure = staticPressure(trueAltFt) + computeDynamicPressure(trueTasKt, trueAltFt);
+  });
+
+  // --- Animation loop ---
+  function loop(now) {
+    const dtSec = (now - lastTime) / 1000;
+    lastTime = now;
+    update(Math.max(dtSec, 0.01));
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+</script>
+
+</body>
+</html>
